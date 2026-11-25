@@ -29,8 +29,7 @@ fieldset{min-width:0}
 <hr>
 
 <div id="inapp" class="box" hidden>
-<b>Heads up!</b> Passkeys don't work inside this app's built-in browser.
-Open this link in Safari or Chrome instead.
+This doesn't work inside this app. Open it in Safari or Chrome.
 <div class="link"><input id="inlink" readonly aria-label="This page's link"><button id="incopy">Copy link</button></div>
 </div>
 
@@ -44,7 +43,7 @@ Open this link in Safari or Chrome instead.
 </div>
 
 <div id="keepform" hidden>
-<p><label for="name">Your name (it goes on your bragging link):</label><br>
+<p><label for="name">Your name:</label><br>
 <input id="name" maxlength="32" autocomplete="nickname" enterkeyhint="done"></p>
 <div class="row"><button id="back">Never mind</button><button id="claim">KEEP IT FOR GOOD</button></div>
 </div>
@@ -374,7 +373,7 @@ var DDIP = (function () {
   'use strict';
   const D = DDIP, $ = id => document.getElementById(id);
   const env = { origin: location.origin, rpId: location.hostname };
-  const HINT = 'If passkey setup fails, try Chrome or Safari, sign into your browser profile, or use a phone. School and work Chromebooks may block passkeys.';
+  const HINT = 'Try Safari or Chrome, or a phone.';
   const mem = {};
   const store = {
     get(k) { try { const v = localStorage.getItem('ddip.' + k); if (v != null) return JSON.parse(v); } catch (e) {} return k in mem ? mem[k] : null; },
@@ -404,7 +403,7 @@ var DDIP = (function () {
     const t = document.createElement('b'); t.textContent = 'Error:'; b.append(t, ' ' + msg);
     if (o.hint !== false) { const p = document.createElement('p'), s = document.createElement('small'); s.textContent = HINT; p.append(s); b.append(p); }
     if (o.retryNew) {
-      const btn = document.createElement('button'); btn.textContent = 'Use a new passkey instead';
+      const btn = document.createElement('button'); btn.textContent = 'Still not working? Tap here';
       btn.onclick = () => { forceNew = true; act(lastKeep); };
       b.append(btn);
     }
@@ -419,7 +418,7 @@ var DDIP = (function () {
     $('share').textContent = label;
     $('share').hidden = !navigator.share;
     $('long').hidden = url.length <= 1800;
-    if (url.length > 1800) say('long', ['small', 'This link is ' + url.length + ' characters long. Some messaging apps cut off long links, so if it breaks, try another app or email.']);
+    if (url.length > 1800) say('long', ['small', 'Long link! If it gets cut off, send it another way.']);
     show('out');
   }
   async function copy(input, btn) {
@@ -444,8 +443,8 @@ var DDIP = (function () {
   function bad(why) {
     $('legend').textContent = 'Uh oh';
     $('num').textContent = '???';
-    say('sub', ['b', 'This link is invalid or has been tampered with.']);
-    say('donemsg', ['small', 'What went wrong: ' + why + '. You can start a fresh chain instead!']);
+    say('sub', ['b', 'This link doesn\'t work.']);
+    say('donemsg', '');
     show('done');
   }
 
@@ -466,8 +465,8 @@ var DDIP = (function () {
       say('sub', ['b', info.name], ' kept it!');
       const part = myPart();
       say('donemsg', d
-        ? 'That took ' + plural(d, 'doubling') + ', each signed by a different passkey. Verified OK.'
-        : 'They kept it right at the start. Bold move! Verified OK.', ...(part ? [' ', ['b', part]] : []));
+        ? 'Doubled ' + plural(d, 'time') + '.'
+        : 'Kept it right at the start.', ...(part ? [' ', ['b', part]] : []));
       show('done');
       return;
     }
@@ -476,25 +475,24 @@ var DDIP = (function () {
       setNum(mine.n);
       if (mine.kind === 'keep') {
         $('legend').textContent = '*** Hall of Fame ***';
-        say('sub', 'You kept this one! Here is your bragging link again:');
-        showOut(mine.url, 'Brag about it >>>', { text: 'I kept ' + fmt(mine.n) + '! Proof:', url: mine.url });
+        say('sub', 'You kept this one. Your link:');
+        showOut(mine.url, 'Brag about it >>>', { text: 'I kept ' + fmt(mine.n) + '!', url: mine.url });
       } else {
         $('legend').textContent = 'You doubled it!';
-        say('sub', 'You already doubled this one. Pass on your link:');
+        say('sub', 'You already doubled this one. Your link:');
         showOut(mine.url, '>>> SEND IT ON >>>', { text: 'It\'s ' + fmt(mine.n) + '. Double it and pass it on, or keep it!', url: mine.url });
       }
       return;
     }
     const cred = store.get('cred');
     if (cred && inChain(cred.id)) {
-      say('sub', 'You already doubled in this chain, so it\'s someone else\'s turn now!');
+      say('sub', 'You already doubled this chain.');
       say('donemsg', ['b', myPart()]);
       show('done');
       return;
     }
     $('legend').textContent = 'The number is';
-    if (!d) say('sub', 'Start a brand new chain! Double it and send it to a friend.');
-    else say('sub', 'Someone sent you this! It has been doubled ' + plural(d, 'time') + ' by ' + plural(d, 'different person').replace('persons', 'people') + '. ', ['small', '(Verified OK)']);
+    say('sub', d ? 'Doubled ' + plural(d, 'time') + '.' : '');
     show('play');
   }
 
@@ -502,7 +500,7 @@ var DDIP = (function () {
   async function getCred() {
     let cred = forceNew ? null : store.get('cred');
     if (cred) return { cred, created: false };
-    const label = store.get('name') || 'Double It player';
+    const label = store.get('name') || 'doubleit';
     const c = await navigator.credentials.create({ publicKey: {
       rp: { id: env.rpId, name: 'Double It & Pass It On' },
       user: { id: crypto.getRandomValues(new Uint8Array(16)), name: label, displayName: label },
@@ -534,10 +532,10 @@ var DDIP = (function () {
         if (!name) throw friendly('Please type your name first.');
         store.set('name', name);
       }
-      status('Waiting for your passkey...');
+      status('');
       const g = await getCred(); created = g.created;
       const cred = g.cred;
-      if (inChain(cred.id)) throw friendly(keep ? 'You doubled in this chain, so you can\'t keep it. Pass it on!' : 'You\'ve already doubled in this chain.');
+      if (inChain(cred.id)) throw friendly(keep ? 'You already doubled this chain, so you can\'t keep it.' : 'You already doubled this chain.');
       const credId = D.dec(cred.id);
       const a = await navigator.credentials.get({ publicKey: {
         challenge: await D.nextChallenge(hops, { keep, name, credId }),
@@ -546,24 +544,24 @@ var DDIP = (function () {
         userVerification: 'required',
         timeout: 120000,
       } });
-      if (D.enc(new Uint8Array(a.rawId)) !== cred.id) throw friendly('Your browser used a different passkey than expected. Please try again.');
+      if (D.enc(new Uint8Array(a.rawId)) !== cred.id) throw friendly('Something went wrong. Try again.');
       const hop = await D.makeHop({ keep, name, credId, pub: D.dec(cred.pub), alg: cred.alg,
         authData: a.response.authenticatorData, clientDataJSON: a.response.clientDataJSON, signature: a.response.signature }, hops, env);
       const next = [...hops, hop];
       let res;
       try { res = await D.verifyChain(next, env); }
-      catch (e) { throw friendly('Your passkey signed something this page could not check (' + e.message + ').'); }
+      catch (e) { throw friendly('Something went wrong. Try again.'); }
       const url = location.origin + location.pathname + '#c=' + await D.pack(next);
       remember({ kind: keep ? 'keep' : 'double', url, n: res.n });
       status('');
       setNum(res.n);
       if (keep) {
         $('legend').textContent = '*** Hall of Fame ***';
-        say('sub', 'You kept ' + fmt(res.n) + '! Here is your bragging link. Anyone who opens it can check that it\'s real.');
-        showOut(url, 'Brag about it >>>', { text: 'I kept ' + fmt(res.n) + '! Proof:', url });
+        say('sub', 'You kept ' + fmt(res.n) + '!');
+        showOut(url, 'Brag about it >>>', { text: 'I kept ' + fmt(res.n) + '!', url });
       } else {
         $('legend').textContent = 'You doubled it!';
-        say('sub', 'It\'s ' + fmt(res.n) + ' now. Pass it on to the next person >>>');
+        say('sub', 'It\'s ' + fmt(res.n) + ' now. Pass it on!');
         showOut(url, '>>> SEND IT ON >>>', { text: 'It\'s ' + fmt(res.n) + '. Double it and pass it on, or keep it!', url });
         if (navigator.share) navigator.share(shareData).catch(() => {}); // may need a tap; the button is right there
       }
@@ -571,12 +569,12 @@ var DDIP = (function () {
       status('');
       const n = e && e.name;
       if (e && e.friendly) err(e.message, { hint: false });
-      else if (n === 'NotAllowedError' && created) status('Passkey made! Now tap ' + (keep ? 'KEEP IT FOR GOOD' : 'DOUBLE IT!') + ' once more to sign.');
-      else if (n === 'NotAllowedError') err('The passkey prompt was cancelled or timed out. Tap the button to try again.', { retryNew: !!store.get('cred') });
-      else if (n === 'InvalidStateError') err(keep ? 'Your passkey is already in this chain, so you can\'t keep it. Pass it on!' : 'You\'ve already doubled in this chain. (Your passkey manager already has a passkey that\'s in it.)', { hint: false });
-      else if (n === 'NotSupportedError') err('This browser or device can\'t make the kind of passkey this game needs.');
-      else if (n === 'SecurityError') err('Passkeys aren\'t allowed on this address. The page has to be on https.');
-      else err('Something went wrong: ' + ((e && e.message) || e));
+      else if (n === 'NotAllowedError' && created) status('Almost done! Tap ' + (keep ? 'KEEP IT FOR GOOD' : 'DOUBLE IT!') + ' again.');
+      else if (n === 'NotAllowedError') err('Cancelled. Tap the button to try again.', { hint: false, retryNew: !!store.get('cred') });
+      else if (n === 'InvalidStateError') err(keep ? 'You already doubled this chain, so you can\'t keep it.' : 'You already doubled this chain.', { hint: false });
+      else if (n === 'NotSupportedError') err('This doesn\'t work in this browser.');
+      else if (n === 'SecurityError') err('This doesn\'t work here.');
+      else err('Something went wrong. Try again.');
     } finally {
       busy = false; setButtons(true);
     }
@@ -600,7 +598,7 @@ var DDIP = (function () {
     }
     if (!window.isSecureContext || !window.crypto || !crypto.subtle || typeof CompressionStream === 'undefined') {
       $('num').textContent = '?';
-      err('This page needs a secure (https) connection and an up-to-date browser. Without that, it can\'t check links or use passkeys.');
+      err('This doesn\'t work in this browser.');
       return;
     }
     const m = location.hash.match(/^#c=(.*)$/);
@@ -612,7 +610,7 @@ var DDIP = (function () {
     render();
     if (!window.PublicKeyCredential && !$('play').hidden) {
       setButtons(false);
-      err('Your browser doesn\'t support passkeys, so you can look but you can\'t play. Try an up-to-date Chrome, Safari, Edge, or Firefox.');
+      err('This doesn\'t work in this browser.');
     }
   }
   load();
