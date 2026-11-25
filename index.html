@@ -449,15 +449,25 @@ var DDIP = (function () {
     show('done');
   }
 
+  // Where this device's passkey appears in the chain: '' if nowhere.
+  function myPart() {
+    const cred = store.get('cred');
+    const i = cred ? hops.findIndex(h => D.enc(h.credId) === cred.id) : -1;
+    if (i < 0) return '';
+    if (hops[i].keep) return '';
+    return i === 0 ? '*** You started this chain! ***' : '*** You were doubler #' + (i + 1) + ' in this chain! ***';
+  }
+
   function render() {
     setNum(info.n);
     const d = info.doublings;
     if (info.kept) {
       $('legend').textContent = '*** Hall of Fame ***';
       say('sub', ['b', info.name], ' kept it!');
+      const part = myPart();
       say('donemsg', d
         ? 'That took ' + plural(d, 'doubling') + ', each signed by a different passkey. Verified OK.'
-        : 'They kept it right at the start. Bold move! Verified OK.');
+        : 'They kept it right at the start. Bold move! Verified OK.', ...(part ? [' ', ['b', part]] : []));
       show('done');
       return;
     }
@@ -478,7 +488,7 @@ var DDIP = (function () {
     const cred = store.get('cred');
     if (cred && inChain(cred.id)) {
       say('sub', 'You already doubled in this chain, so it\'s someone else\'s turn now!');
-      say('donemsg', '');
+      say('donemsg', ['b', myPart()]);
       show('done');
       return;
     }
