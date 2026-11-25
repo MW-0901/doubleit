@@ -430,7 +430,10 @@ var DDIP = (function () {
   }
   function selectAll() { this.setSelectionRange(0, this.value.length); }
 
+  // Remembers what this device did with a received link. The home page (empty chain) always has the
+  // same tip, and every visit there starts a fresh chain, so it is never remembered.
   function remember(rec) {
+    if (!hops.length) return;
     const d = store.get('done') || {};
     d[D.enc(info.tip)] = rec;
     const ks = Object.keys(d); while (ks.length > 50) delete d[ks.shift()];
@@ -458,7 +461,7 @@ var DDIP = (function () {
       show('done');
       return;
     }
-    const mine = (store.get('done') || {})[D.enc(info.tip)];
+    const mine = hops.length ? (store.get('done') || {})[D.enc(info.tip)] : null;
     if (mine) {
       setNum(mine.n);
       if (mine.kind === 'keep') {
