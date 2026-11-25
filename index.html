@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Double It &amp; Pass It On</title>
+<style>
+:root{color-scheme:light dark}
+main{max-width:40em;margin:0 auto;padding:0 1em;overflow-wrap:break-word}
+h1,.c{text-align:center}
+.big{font-size:4rem;font-family:monospace;margin:.2em 0;overflow-wrap:anywhere}
+button,input{font-size:1rem}
+button{min-height:2.75em;padding:0 1.25em}
+.row button{display:block;width:100%;margin:.5em 0}
+@media (min-width:30em){.row{display:flex;gap:1em}.row button{flex:1}}
+.link{display:flex;gap:.5em;margin:.5em 0}
+.link input{flex:1;min-width:0;min-height:2.75em}
+#name{width:100%;box-sizing:border-box;min-height:2.75em}
+fieldset{min-width:0}
+.box{border:1px solid;padding:.5em 1em;margin:1em 0}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+<h1>*** Double It &amp; Pass It On ***</h1>
+<p class="c"><i>Welcome to my page!</i></p>
+<hr>
+
+<div id="inapp" class="box" hidden>
+<b>Heads up!</b> Passkeys don't work inside this app's built-in browser.
+Open this link in Safari or Chrome instead.
+<div class="link"><input id="inlink" readonly aria-label="This page's link"><button id="incopy">Copy link</button></div>
+</div>
+
+<fieldset>
+<legend id="legend">The number is</legend>
+<p class="big c"><b id="num">1</b></p>
+<p class="c" id="sub"></p>
+
+<div id="play" hidden>
+<div class="row"><button id="keep">KEEP IT</button><button id="dbl">DOUBLE IT!</button></div>
+</div>
+
+<div id="keepform" hidden>
+<p><label for="name">Your name (it goes on your bragging link):</label><br>
+<input id="name" maxlength="32" autocomplete="nickname" enterkeyhint="done"></p>
+<div class="row"><button id="back">Never mind</button><button id="claim">KEEP IT FOR GOOD</button></div>
+</div>
+
+<div id="out" hidden>
+<p class="c"><button id="share">&gt;&gt;&gt; SEND IT ON &gt;&gt;&gt;</button></p>
+<div class="link"><input id="link" readonly aria-label="Link"><button id="copy">Copy link</button></div>
+<p id="long" hidden></p>
+</div>
+
+<div id="done" hidden>
+<p id="donemsg"></p>
+<p class="c"><a id="restart" href="./">&gt;&gt;&gt; Start a new chain &lt;&lt;&lt;</a></p>
+</div>
+
+<p id="status" class="c"></p>
+<div id="err" class="box" hidden></div>
+</fieldset>
+
+</main>
+
+<script id="core">
+// ===== Pure chain logic (no DOM). Also loaded by test/verify.test.mjs. =====
+var DDIP = (function () {
+  'use strict';
+  const te = new TextEncoder(), td = new TextDecoder('utf-8', { fatal: true });
+  const MAX_FRAG = 24000, MAX_BYTES = 64000, MAX_HOPS = 64, MAX_NAME = 32;
+  const subtle = () => crypto.subtle;
+
+  function u8(x) {
+    if (x instanceof Uint8Array) return x;
+    if (x instanceof ArrayBuffer) return new Uint8Array(x);
+    return new Uint8Array(x.buffer, x.byteOffset, x.byteLength);
+  }
+  function cat(...a) {
+    let n = 0; for (const x of a) n += x.length;
+    const o = new Uint8Array(n); let i = 0;
+    for (const x of a) { o.set(x, i); i += x.length; }
+    return o;
+  }
+  function eq(a, b) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+  function enc(b) {
+    b = u8(b); let s = '';
+    for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function dec(s) {
+    if (!/^[A-Za-z0-9_-]*$/.test(s)) throw new Error('bad characters in link');
+    s = s.replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    const b = atob(s), o = new Uint8Array(b.length);
+    for (let i = 0; i < b.length; i++) o[i] = b.charCodeAt(i);
+    return o;
+  }
+  async function sha(b) { return new Uint8Array(await subtle().digest('SHA-256', b)); }
+
+  function varint(n) { const o = []; while (n >= 0x80) { o.push((n & 0x7f) | 0x80); n >>>= 7; } o.push(n); return new Uint8Array(o); }
+  function readVarint(b, i) {
+    let n = 0, s = 0, c;
+    do {
+      if (i >= b.length) throw new Error('link is cut off');
+      c = b[i++]; n |= (c & 0x7f) << s; s += 7;
+      if (s > 21) throw new Error('bad length');
+    } while (c & 0x80);
+    return [n, i];
+  }
+
+  // The number after k doublings, as a decimal string (BigInt: no overflow).
+  const nAt = k => (2n ** BigInt(k)).toString();
+
+  function cleanName(s) {
+    s = String(s || '').normalize('NFC').replace(/\s+/g, ' ')
+      .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g, '')
+      .replace(/ {2,}/g, ' ').trim();
+    return Array.from(s).slice(0, MAX_NAME).join('').trim();
+  }
+
+  // ---- hash chain ----
+  const Z = new Uint8Array([0]);
+  const h0 = () => sha(te.encode('ddip-v1'));
+  // nStr: the number this hop results in (double) or keeps (keep).
+  function hashStep(prev, nStr, hop) {
+    if (!hop.keep) return sha(cat(prev, te.encode('D'), Z, te.encode(nStr), Z, hop.credId));
+    return sha(cat(prev, te.encode('K'), Z, te.encode(nStr), Z, te.encode(hop.name), Z, hop.credId));
+  }
+  async function tip(hops) {
+    let h = await h0(), d = 0;
+    for (const hop of hops) { h = await hashStep(h, nAt(hop.keep ? d : d + 1), hop); if (!hop.keep) d++; }
+    return { h, d };
+  }
+  // Challenge the passkey must sign for a new hop {keep, name, credId} appended to hops.
+  async function nextChallenge(hops, o) {
+    const t = await tip(hops);
+    return hashStep(t.h, nAt(o.keep ? t.d : t.d + 1), o);
+  }
+  const cdPrefix = (ch, origin) => '{"type":"webauthn.get","challenge":"' + enc(ch) + '","origin":' + JSON.stringify(origin);
+
+  // ---- binary chain format ----
+  // [version=1] then hops: [flags] (keep? name) credId pub authTail cd sig  - each field varint-length-prefixed.
+  // flags: bit0 RS256, bit1 keep, bit2 clientDataJSON stored in full (else only the part after the standard prefix),
+  //        bit3 ES256 key omitted ("pub" holds an 8-byte SHA256 fingerprint; the key is recovered from the signature),
+  //        bit4 y-parity of the signature's R point (needed for recovery).
+  function encodeChain(hops) {
+    const parts = [new Uint8Array([1])];
+    for (const h of hops) {
+      parts.push(new Uint8Array([(h.alg === -257 ? 1 : 0) | (h.keep ? 2 : 0) | (h.cdFull ? 4 : 0) | (h.rec ? 8 : 0) | (h.par ? 16 : 0)]));
+      const f = h.keep ? [te.encode(h.name)] : [];
+      f.push(h.credId, h.pub, h.authTail, h.cd, h.sig);
+      for (const x of f) parts.push(varint(x.length), x);
+    }
+    return cat(...parts);
+  }
+  function decodeChain(b) {
+    let i = 0;
+    const rd = () => { let n; [n, i] = readVarint(b, i); if (i + n > b.length) throw new Error('link is cut off'); const x = b.slice(i, i + n); i += n; return x; };
+    if (b[i++] !== 1) throw new Error('unknown link version');
+    const hops = [];
+    while (i < b.length) {
+      if (hops.length >= MAX_HOPS) throw new Error('chain is too long');
+      const f = b[i++];
+      if (f & ~31 || ((f & 8) && (f & 1)) || ((f & 16) && !(f & 8))) throw new Error('bad hop');
+      const h = { alg: f & 1 ? -257 : -7, keep: !!(f & 2), cdFull: !!(f & 4), rec: !!(f & 8), par: (f >> 4) & 1 };
+      if (h.keep) h.name = td.decode(rd());
+      h.credId = rd(); h.pub = rd(); h.authTail = rd(); h.cd = rd(); h.sig = rd();
+      hops.push(h);
+    }
+    return hops;
+  }
+  async function pipe(bytes, stream, limit) {
+    const r = new Blob([bytes]).stream().pipeThrough(stream).getReader();
+    const chunks = []; let n = 0;
+    for (;;) {
+      const { done, value } = await r.read();
+      if (done) break;
+      n += value.length;
+      if (n > limit) { r.cancel().catch(() => {}); throw new Error('link is too big'); }
+      chunks.push(value);
+    }
+    return cat(...chunks);
+  }
+  async function pack(hops) { return enc(await pipe(encodeChain(hops), new CompressionStream('deflate-raw'), Infinity)); }
+  async function unpack(s) {
+    if (s.length > MAX_FRAG) throw new Error('link is too long');
+    let raw;
+    try { raw = await pipe(dec(s), new DecompressionStream('deflate-raw'), MAX_BYTES); }
+    catch (e) { throw new Error(/too big/.test(e.message) ? e.message : 'link is damaged or cut off'); }
+    return decodeChain(raw);
+  }
+
+  // ---- keys & signatures ----
+  const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' }, RSA = { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' };
+  // SPKI (from getPublicKey()) -> compact form: EC = 65-byte raw point; RSA = varint(len n) || n || e.
+  async function pubFromSpki(spki, alg) {
+    if (alg === -7) return new Uint8Array(await subtle().exportKey('raw', await subtle().importKey('spki', spki, ECDSA, true, ['verify'])));
+    if (alg === -257) {
+      const j = await subtle().exportKey('jwk', await subtle().importKey('spki', spki, RSA, true, ['verify']));
+      const n = dec(j.n), e = dec(j.e);
+      return cat(varint(n.length), n, e);
+    }
+    throw new Error('unsupported key type');
+  }
+  async function importPub(pub, alg) {
+    if (alg === -7) {
+      if (pub.length !== 65 || pub[0] !== 4) throw new Error('bad key');
+      return subtle().importKey('raw', pub, ECDSA, false, ['verify']);
+    }
+    const [len, i] = readVarint(pub, 0);
+    const n = pub.slice(i, i + len), e = pub.slice(i + len);
+    if (n.length < 256 || n.length !== len || !e.length || e.length > 8) throw new Error('bad key');
+    return subtle().importKey('jwk', { kty: 'RSA', n: enc(n), e: enc(e), alg: 'RS256', ext: true }, RSA, false, ['verify']);
+  }
+  // ASN.1 DER ECDSA signature -> raw r||s (64 bytes), which WebCrypto expects.
+  function derToRaw(der) {
+    der = u8(der);
+    let i = 0;
+    if (der[i++] !== 0x30) throw new Error('bad signature');
+    let len = der[i++]; if (len & 0x80) i += len & 0x7f;
+    const out = new Uint8Array(64);
+    for (let k = 0; k < 2; k++) {
+      if (der[i++] !== 0x02) throw new Error('bad signature');
+      const l = der[i++]; let v = der.slice(i, i + l); i += l;
+      while (v.length > 32 && v[0] === 0) v = v.slice(1);
+      if (v.length > 32 || !v.length) throw new Error('bad signature');
+      out.set(v, 32 * k + 32 - v.length);
+    }
+    return out;
+  }
+
+  // ---- P-256 public key recovery from an ECDSA signature ----
+  // Lets a hop store an 8-byte key fingerprint instead of the 65-byte key. Safety: the recovered key must
+  // match the fingerprint AND pass WebCrypto's own verify, so a bug here can only reject links, never accept them.
+  const P = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffffn;
+  const N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
+  const CB = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604bn;
+  const G = [0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296n,
+             0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5n, 1n];
+  const md = (a, m = P) => { a %= m; return a < 0n ? a + m : a; };
+  function pw(b, e, m) { let r = 1n; b = md(b, m); while (e > 0n) { if (e & 1n) r = r * b % m; b = b * b % m; e >>= 1n; } return r; }
+  const inv = (a, m) => pw(a, m - 2n, m);
+  // Jacobian point arithmetic (a = -3). null = point at infinity.
+  function dbl(p) {
+    if (!p || p[1] === 0n) return null;
+    const [X, Y, Z] = p, d = Z * Z % P, g = Y * Y % P, be = X * g % P, al = 3n * md(X - d) * (X + d) % P;
+    const X3 = md(al * al - 8n * be);
+    return [X3, md(al * md(4n * be - X3) - 8n * g * g), md((Y + Z) * (Y + Z) - g - d)];
+  }
+  function add(p, q) {
+    if (!p) return q; if (!q) return p;
+    const [X1, Y1, Z1] = p, [X2, Y2, Z2] = q;
+    const z1 = Z1 * Z1 % P, z2 = Z2 * Z2 % P, U1 = X1 * z2 % P, U2 = X2 * z1 % P;
+    const S1 = Y1 * Z2 % P * z2 % P, S2 = Y2 * Z1 % P * z1 % P;
+    if (U1 === U2) return S1 === S2 ? dbl(p) : null;
+    const H = md(U2 - U1), I = 4n * H * H % P, J = H * I % P, r = 2n * md(S2 - S1) % P, V = U1 * I % P;
+    const X3 = md(r * r - J - 2n * V);
+    return [X3, md(r * md(V - X3) - 2n * S1 * J), md(((Z1 + Z2) * (Z1 + Z2) - z1 - z2) * H)];
+  }
+  function mul2(a, A, b, Bp) { // a*A + b*Bp (Shamir's trick)
+    const AB = add(A, Bp); let R = null;
+    for (let i = 255; i >= 0; i--) {
+      R = dbl(R);
+      const x = (a >> BigInt(i)) & 1n, y = (b >> BigInt(i)) & 1n;
+      if (x && y) R = add(R, AB); else if (x) R = add(R, A); else if (y) R = add(R, Bp);
+    }
+    return R;
+  }
+  const toInt = b => { let x = 0n; for (const c of b) x = (x << 8n) | BigInt(c); return x; };
+  const toB32 = x => { const o = new Uint8Array(32); for (let i = 31; i >= 0; i--) { o[i] = Number(x & 0xffn); x >>= 8n; } return o; };
+  // Raw r||s signature over msg -> raw 65-byte public key, or null. parity = y-parity of R.
+  async function recoverKey(sig, msg, parity) {
+    const r = toInt(sig.subarray(0, 32)), s = toInt(sig.subarray(32, 64));
+    if (!r || !s || r >= N || s >= N) return null;
+    const e = toInt(await sha(msg)) % N;
+    const rhs = md(r * r % P * r - 3n * r + CB);
+    let y = pw(rhs, (P + 1n) / 4n, P);
+    if (y * y % P !== rhs) return null;
+    if (Number(y & 1n) !== parity) y = P - y;
+    const ri = inv(r, N);
+    const Q = mul2(md(-e * ri, N), G, md(s * ri, N), [r, y, 1n]);
+    if (!Q) return null;
+    const zi = inv(Q[2], P), zi2 = zi * zi % P;
+    return cat(new Uint8Array([4]), toB32(Q[0] * zi2 % P), toB32(Q[1] * zi2 % P * zi % P));
+  }
+  const fingerprint = async pub => (await sha(pub)).slice(0, 8);
+
+  // Build a compact hop from a WebAuthn assertion.
+  async function makeHop(o, hops, env) {
+    const ad = u8(o.authData), cd = u8(o.clientDataJSON);
+    const prefix = te.encode(cdPrefix(await nextChallenge(hops, o), env.origin));
+    const std = cd.length >= prefix.length && eq(cd.subarray(0, prefix.length), prefix);
+    const hop = {
+      keep: !!o.keep, alg: o.alg, credId: u8(o.credId), pub: u8(o.pub),
+      authTail: ad.slice(32), cdFull: !std, cd: std ? cd.slice(prefix.length) : cd,
+      sig: o.alg === -7 ? derToRaw(o.signature) : u8(o.signature).slice(),
+    };
+    if (hop.keep) hop.name = o.name;
+    if (hop.alg === -7) { // drop the key if it can be recovered from the signature
+      const msg = cat(ad, await sha(cd));
+      for (const par of [0, 1]) {
+        const q = await recoverKey(hop.sig, msg, par);
+        if (q && eq(q, hop.pub)) { hop.rec = true; hop.par = par; hop.pub = await fingerprint(q); break; }
+      }
+    }
+    return hop;
+  }
+
+  // Verify every hop. Throws Error with a reason, or returns a summary.
+  async function verifyChain(hops, env) {
+    const rpHash = await sha(te.encode(env.rpId));
+    let h = await h0(), d = 0;
+    const seenC = new Set(), seenP = new Set();
+    for (let i = 0; i < hops.length; i++) {
+      const hop = hops[i], at = 'step ' + (i + 1) + ': ';
+      if (hop.keep && i !== hops.length - 1) throw new Error(at + 'the chain continues after someone kept it');
+      if (hop.keep && (!hop.name || hop.name !== cleanName(hop.name))) throw new Error(at + 'bad name');
+      if (hop.alg !== -7 && hop.alg !== -257) throw new Error(at + 'unsupported key type');
+      if (!hop.credId.length || hop.credId.length > 1023) throw new Error(at + 'bad passkey id');
+      const ck = enc(hop.credId);
+      if (seenC.has(ck)) throw new Error(at + 'the same passkey appears twice in this chain');
+      seenC.add(ck);
+      // Rule 7 (doubling) is built in: the signed challenge commits to 2^k.
+      const hn = await hashStep(h, nAt(hop.keep ? d : d + 1), hop);
+      const cdBytes = hop.cdFull ? hop.cd : cat(te.encode(cdPrefix(hn, env.origin)), hop.cd);
+      let c;
+      try { c = JSON.parse(td.decode(cdBytes)); } catch (e) { throw new Error(at + 'unreadable signature data'); }
+      if (!c || c.type !== 'webauthn.get') throw new Error(at + 'wrong signature type');
+      if (c.challenge !== enc(hn)) throw new Error(at + 'signature is for a different number or chain');
+      if (c.origin !== env.origin) throw new Error(at + 'signed on a different website');
+      if (c.crossOrigin === true) throw new Error(at + 'signed inside another website');
+      if (hop.authTail.length < 5) throw new Error(at + 'bad authenticator data');
+      if ((hop.authTail[0] & 0x05) !== 0x05) throw new Error(at + 'passkey did not check the user');
+      // authData = SHA256(rpId) || tail. The rpId hash is rebuilt here, so a key used on another site cannot pass.
+      const authData = cat(rpHash, hop.authTail);
+      if (hop.alg === -7 && hop.sig.length !== 64) throw new Error(at + 'bad signature');
+      const msg = cat(authData, await sha(cdBytes));
+      let pub = hop.pub, ok = false;
+      if (hop.rec) {
+        if (hop.pub.length !== 8) throw new Error(at + 'bad key');
+        pub = await recoverKey(hop.sig, msg, hop.par);
+        if (!pub || !eq(await fingerprint(pub), hop.pub)) throw new Error(at + 'signature does not match');
+      }
+      const pk = enc(pub);
+      if (seenP.has(pk)) throw new Error(at + 'the same passkey appears twice in this chain');
+      seenP.add(pk);
+      try {
+        const key = await importPub(pub, hop.alg);
+        ok = await subtle().verify(hop.alg === -7 ? { name: 'ECDSA', hash: 'SHA-256' } : RSA, key, hop.sig, msg);
+      } catch (e) { ok = false; }
+      if (!ok) throw new Error(at + 'signature does not match');
+      h = hn; if (!hop.keep) d++;
+    }
+    const last = hops[hops.length - 1];
+    const kept = !!(last && last.keep);
+    return { doublings: d, n: nAt(d), kept, name: kept ? last.name : null, tip: h };
+  }
+
+  return { enc, dec, sha, cat, pack, unpack, encodeChain, decodeChain, verifyChain, makeHop, nextChallenge,
+    hashStep, tip, pubFromSpki, derToRaw, recoverKey, cleanName, nAt, MAX_FRAG };
+})();
+</script>
+
+<script>
+(function () {
+  'use strict';
+  const D = DDIP, $ = id => document.getElementById(id);
+  const env = { origin: location.origin, rpId: location.hostname };
+  const HINT = 'If passkey setup fails, try Chrome or Safari, sign into your browser profile, or use a phone. School and work Chromebooks may block passkeys.';
+  const mem = {};
+  const store = {
+    get(k) { try { const v = localStorage.getItem('ddip.' + k); if (v != null) return JSON.parse(v); } catch (e) {} return k in mem ? mem[k] : null; },
+    set(k, v) { mem[k] = v; try { localStorage.setItem('ddip.' + k, JSON.stringify(v)); } catch (e) {} },
+  };
+  let hops = [], info = null, busy = false, forceNew = false, lastKeep = false, shareData = null;
+
+  const fmt = s => s.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
+  function show(id) { for (const s of ['play', 'keepform', 'out', 'done']) $(s).hidden = s !== id; }
+  function setNum(n) {
+    const s = fmt(n); $('num').textContent = s;
+    $('num').parentNode.style.fontSize = s.length > 6 ? 'min(4rem, ' + Math.floor(140 / s.length) + 'vw)' : '';
+  }
+  // say(id, 'text', ['b', 'bold'], ...) - builds content with textContent only.
+  function say(id, ...parts) {
+    const el = $(id); el.textContent = '';
+    for (const p of parts) {
+      if (typeof p === 'string') el.append(p);
+      else { const t = document.createElement(p[0]); t.textContent = p[1]; el.append(t); }
+    }
+  }
+  function status(s) { $('status').textContent = s || ''; }
+  function clearErr() { $('err').hidden = true; }
+  function err(msg, o = {}) {
+    const b = $('err'); b.textContent = '';
+    const t = document.createElement('b'); t.textContent = 'Error:'; b.append(t, ' ' + msg);
+    if (o.hint !== false) { const p = document.createElement('p'), s = document.createElement('small'); s.textContent = HINT; p.append(s); b.append(p); }
+    if (o.retryNew) {
+      const btn = document.createElement('button'); btn.textContent = 'Use a new passkey instead';
+      btn.onclick = () => { forceNew = true; act(lastKeep); };
+      b.append(btn);
+    }
+    b.hidden = false;
+  }
+  function friendly(msg) { const e = new Error(msg); e.friendly = true; return e; }
+  function setButtons(on) { for (const b of document.querySelectorAll('fieldset button')) b.disabled = !on; }
+
+  function showOut(url, label, data) {
+    shareData = data;
+    $('link').value = url;
+    $('share').textContent = label;
+    $('share').hidden = !navigator.share;
+    $('long').hidden = url.length <= 1800;
+    if (url.length > 1800) say('long', ['small', 'This link is ' + url.length + ' characters long. Some messaging apps cut off long links, so if it breaks, try another app or email.']);
+    show('out');
+  }
+  async function copy(input, btn) {
+    try { await navigator.clipboard.writeText(input.value); }
+    catch (e) { input.focus(); input.setSelectionRange(0, input.value.length); try { document.execCommand('copy'); } catch (e2) {} }
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy link'; }, 2000);
+  }
+  function selectAll() { this.setSelectionRange(0, this.value.length); }
+
+  function remember(rec) {
+    const d = store.get('done') || {};
+    d[D.enc(info.tip)] = rec;
+    const ks = Object.keys(d); while (ks.length > 50) delete d[ks.shift()];
+    store.set('done', d);
+  }
+  const inChain = id => hops.some(h => D.enc(h.credId) === id);
+
+  function bad(why) {
+    $('legend').textContent = 'Uh oh';
+    $('num').textContent = '???';
+    say('sub', ['b', 'This link is invalid or has been tampered with.']);
+    say('donemsg', ['small', 'What went wrong: ' + why + '. You can start a fresh chain instead!']);
+    show('done');
+  }
+
+  function render() {
+    setNum(info.n);
+    const d = info.doublings;
+    if (info.kept) {
+      $('legend').textContent = '*** Hall of Fame ***';
+      say('sub', ['b', info.name], ' kept it!');
+      say('donemsg', d
+        ? 'That took ' + plural(d, 'doubling') + ', each signed by a different passkey. Verified OK.'
+        : 'They kept it right at the start. Bold move! Verified OK.');
+      show('done');
+      return;
+    }
+    const mine = (store.get('done') || {})[D.enc(info.tip)];
+    if (mine) {
+      setNum(mine.n);
+      if (mine.kind === 'keep') {
+        $('legend').textContent = '*** Hall of Fame ***';
+        say('sub', 'You kept this one! Here is your bragging link again:');
+        showOut(mine.url, 'Brag about it >>>', { text: 'I kept ' + fmt(mine.n) + '! Proof:', url: mine.url });
+      } else {
+        $('legend').textContent = 'You doubled it!';
+        say('sub', 'You already doubled this one. Pass on your link:');
+        showOut(mine.url, '>>> SEND IT ON >>>', { text: 'It\'s ' + fmt(mine.n) + '. Double it and pass it on, or keep it!', url: mine.url });
+      }
+      return;
+    }
+    const cred = store.get('cred');
+    if (cred && inChain(cred.id)) {
+      say('sub', 'You already doubled in this chain, so it\'s someone else\'s turn now!');
+      say('donemsg', '');
+      show('done');
+      return;
+    }
+    $('legend').textContent = 'The number is';
+    if (!d) say('sub', 'Start a brand new chain! Double it and send it to a friend.');
+    else say('sub', 'Someone sent you this! It has been doubled ' + plural(d, 'time') + ' by ' + plural(d, 'different person').replace('persons', 'people') + '. ', ['small', '(Verified OK)']);
+    show('play');
+  }
+
+  // Returns {cred, created}. Uses the passkey this device knows, or makes a new one.
+  async function getCred() {
+    let cred = forceNew ? null : store.get('cred');
+    if (cred) return { cred, created: false };
+    const label = store.get('name') || 'Double It player';
+    const c = await navigator.credentials.create({ publicKey: {
+      rp: { id: env.rpId, name: 'Double It & Pass It On' },
+      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: label, displayName: label },
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+      authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'required' },
+      attestation: 'none',
+      excludeCredentials: hops.map(h => ({ type: 'public-key', id: h.credId })),
+      timeout: 120000,
+    } });
+    const r = c.response;
+    if (typeof r.getPublicKey !== 'function') throw Object.assign(new Error('old browser'), { name: 'NotSupportedError' });
+    const alg = r.getPublicKeyAlgorithm(), spki = r.getPublicKey();
+    if (!spki || (alg !== -7 && alg !== -257)) throw Object.assign(new Error('unsupported key'), { name: 'NotSupportedError' });
+    cred = { id: D.enc(new Uint8Array(c.rawId)), alg, pub: D.enc(await D.pubFromSpki(new Uint8Array(spki), alg)) };
+    store.set('cred', cred);
+    forceNew = false;
+    return { cred, created: true };
+  }
+
+  async function act(keep) {
+    if (busy) return;
+    busy = true; lastKeep = keep; clearErr(); setButtons(false);
+    let created = false;
+    try {
+      let name;
+      if (keep) {
+        name = D.cleanName($('name').value);
+        if (!name) throw friendly('Please type your name first.');
+        store.set('name', name);
+      }
+      status('Waiting for your passkey...');
+      const g = await getCred(); created = g.created;
+      const cred = g.cred;
+      if (inChain(cred.id)) throw friendly(keep ? 'You doubled in this chain, so you can\'t keep it. Pass it on!' : 'You\'ve already doubled in this chain.');
+      const credId = D.dec(cred.id);
+      const a = await navigator.credentials.get({ publicKey: {
+        challenge: await D.nextChallenge(hops, { keep, name, credId }),
+        rpId: env.rpId,
+        allowCredentials: [{ type: 'public-key', id: credId }],
+        userVerification: 'required',
+        timeout: 120000,
+      } });
+      if (D.enc(new Uint8Array(a.rawId)) !== cred.id) throw friendly('Your browser used a different passkey than expected. Please try again.');
+      const hop = await D.makeHop({ keep, name, credId, pub: D.dec(cred.pub), alg: cred.alg,
+        authData: a.response.authenticatorData, clientDataJSON: a.response.clientDataJSON, signature: a.response.signature }, hops, env);
+      const next = [...hops, hop];
+      let res;
+      try { res = await D.verifyChain(next, env); }
+      catch (e) { throw friendly('Your passkey signed something this page could not check (' + e.message + ').'); }
+      const url = location.origin + location.pathname + '#c=' + await D.pack(next);
+      remember({ kind: keep ? 'keep' : 'double', url, n: res.n });
+      status('');
+      setNum(res.n);
+      if (keep) {
+        $('legend').textContent = '*** Hall of Fame ***';
+        say('sub', 'You kept ' + fmt(res.n) + '! Here is your bragging link. Anyone who opens it can check that it\'s real.');
+        showOut(url, 'Brag about it >>>', { text: 'I kept ' + fmt(res.n) + '! Proof:', url });
+      } else {
+        $('legend').textContent = 'You doubled it!';
+        say('sub', 'It\'s ' + fmt(res.n) + ' now. Pass it on to the next person >>>');
+        showOut(url, '>>> SEND IT ON >>>', { text: 'It\'s ' + fmt(res.n) + '. Double it and pass it on, or keep it!', url });
+        if (navigator.share) navigator.share(shareData).catch(() => {}); // may need a tap; the button is right there
+      }
+    } catch (e) {
+      status('');
+      const n = e && e.name;
+      if (e && e.friendly) err(e.message, { hint: false });
+      else if (n === 'NotAllowedError' && created) status('Passkey made! Now tap ' + (keep ? 'KEEP IT FOR GOOD' : 'DOUBLE IT!') + ' once more to sign.');
+      else if (n === 'NotAllowedError') err('The passkey prompt was cancelled or timed out. Tap the button to try again.', { retryNew: !!store.get('cred') });
+      else if (n === 'InvalidStateError') err(keep ? 'Your passkey is already in this chain, so you can\'t keep it. Pass it on!' : 'You\'ve already doubled in this chain. (Your passkey manager already has a passkey that\'s in it.)', { hint: false });
+      else if (n === 'NotSupportedError') err('This browser or device can\'t make the kind of passkey this game needs.');
+      else if (n === 'SecurityError') err('Passkeys aren\'t allowed on this address. The page has to be on https.');
+      else err('Something went wrong: ' + ((e && e.message) || e));
+    } finally {
+      busy = false; setButtons(true);
+    }
+  }
+
+  async function load() {
+    $('restart').href = location.pathname;
+    for (const i of [$('link'), $('inlink')]) { i.addEventListener('focus', selectAll); i.addEventListener('click', selectAll); }
+    $('copy').onclick = () => copy($('link'), $('copy'));
+    $('incopy').onclick = () => copy($('inlink'), $('incopy'));
+    $('share').onclick = () => { if (shareData) navigator.share(shareData).catch(() => {}); };
+    $('dbl').onclick = () => act(false);
+    $('keep').onclick = () => { clearErr(); $('name').value = store.get('name') || ''; show('keepform'); $('name').focus(); };
+    $('back').onclick = () => { clearErr(); status(''); show('play'); };
+    $('claim').onclick = () => act(true);
+    $('name').addEventListener('keydown', e => { if (e.key === 'Enter') act(true); });
+    addEventListener('hashchange', () => location.reload());
+
+    if (/FBAN|FBAV|FB_IAB|FBIOS|Instagram|Messenger|musical_ly|TikTok|Bytedance|Snapchat|\bLine\/|KAKAOTALK|LinkedInApp|Pinterest|Twitter|; wv\)/i.test(navigator.userAgent)) {
+      $('inlink').value = location.href; $('inapp').hidden = false;
+    }
+    if (!window.isSecureContext || !window.crypto || !crypto.subtle || typeof CompressionStream === 'undefined') {
+      $('num').textContent = '?';
+      err('This page needs a secure (https) connection and an up-to-date browser. Without that, it can\'t check links or use passkeys.');
+      return;
+    }
+    const m = location.hash.match(/^#c=(.*)$/);
+    try {
+      hops = m ? await D.unpack(m[1]) : [];
+      if (m && !hops.length) throw new Error('the link is empty');
+      info = await D.verifyChain(hops, env);
+    } catch (e) { return bad(e.message); }
+    render();
+    if (!window.PublicKeyCredential && !$('play').hidden) {
+      setButtons(false);
+      err('Your browser doesn\'t support passkeys, so you can look but you can\'t play. Try an up-to-date Chrome, Safari, Edge, or Firefox.');
+    }
+  }
+  load();
+})();
+</script>
+</body>
+</html>
